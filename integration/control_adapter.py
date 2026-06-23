@@ -37,6 +37,7 @@ def _run_summary_pass() -> dict:
     logger.info("summary_pass.meetings_fetched count=%d", len(meetings))
 
     created = skipped = processed = 0
+    created_meetings: list[str] = []
 
     for meeting in meetings:
         if processed >= _MAX_MEETINGS_PER_RUN:
@@ -72,7 +73,8 @@ def _run_summary_pass() -> dict:
             continue
 
         processed += 1
-        logger.info("summary_pass.analyzing guid=%s name=%r", guid, meeting.get("name", guid))
+        meeting_name = meeting.get("name") or guid
+        logger.info("summary_pass.analyzing guid=%s name=%r", guid, meeting_name)
 
         result = analyzer.analyze(transcript)
         if not result["summary"]:
@@ -83,6 +85,7 @@ def _run_summary_pass() -> dict:
             client.update_meeting_summary(guid, result["summary"])
             logger.info("summary_pass.summary_updated guid=%s", guid)
             created += 1
+            created_meetings.append(meeting_name)
         except Exception as exc:
             logger.error("summary_pass.summary_update_failed guid=%s error=%s", guid, exc)
             continue
@@ -97,7 +100,7 @@ def _run_summary_pass() -> dict:
 
         logger.info("summary_pass.done guid=%s topics_created=%d", guid, topics_created)
 
-    return {"created": created, "skipped": skipped, "processed": processed}
+    return {"created": created, "skipped": skipped, "processed": processed, "meetings": created_meetings}
 
 
 def start(job_name: str, **kwargs) -> dict:
@@ -161,7 +164,6 @@ def run(job_name: str, **kwargs) -> dict:
          data={"correlation_id": correlation_id} if correlation_id else None)
 
     def _worker():
-        _slack.notify("Run started")
         try:
             result = _run_summary_pass()
             with state.lock:
@@ -171,8 +173,9 @@ def run(job_name: str, **kwargs) -> dict:
             msg = (f"run #{count}: processed {result['processed']} meeting(s), "
                    f"summarized {result['created']}, skipped {result['skipped']}")
             logger.info("control.run.completed %s", msg)
-            _slack.notify(f"Run complete — processed {result['processed']}, "
-                          f"summarized {result['created']}, skipped {result['skipped']}")
+            if result["created"] > 0:
+                meetings_list = "\n".join(f"• {m}" for m in result.get("meetings", []))
+                _slack.notify(f"summarized {result['created']} meeting(s):\n{meetings_list}")
             emit(EventType.COMPLETED, job_name, detail=msg,
                  data={"correlation_id": correlation_id} if correlation_id else None)
         except Exception as err:
@@ -200,7 +203,6 @@ def manual_run(job_name: str, **kwargs) -> dict:
 
     emit(EventType.STARTED, job_name, detail="manual_run: starting summary generation pass",
          data={"correlation_id": correlation_id} if correlation_id else None)
-    _slack.notify("Manual run started")
     try:
         result = _run_summary_pass()
         with state.lock:
@@ -209,8 +211,9 @@ def manual_run(job_name: str, **kwargs) -> dict:
             count = state.run_count
         msg = (f"manual_run #{count}: processed {result['processed']} meeting(s), "
                f"summarized {result['created']}, skipped {result['skipped']}")
-        _slack.notify(f"Manual run complete — processed {result['processed']}, "
-                      f"summarized {result['created']}, skipped {result['skipped']}")
+        if result["created"] > 0:
+            meetings_list = "\n".join(f"• {m}" for m in result.get("meetings", []))
+            _slack.notify(f"summarized {result['created']} meeting(s):\n{meetings_list}")
         emit(EventType.COMPLETED, job_name, detail=msg,
              data={"correlation_id": correlation_id} if correlation_id else None)
         return {"job_name": job_name, "action": "manual_run", "ok": True,
